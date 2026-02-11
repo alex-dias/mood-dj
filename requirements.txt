@@ -1,0 +1,16 @@
+# --- LLM / Agent ---
+langchain>=0.2.0
+langchain-core>=0.2.0
+langchain-google-genai>=1.0.0
+
+# --- Spotify ---
+spotipy>=2.23.0
+
+# --- Telegram Bot ---
+python-telegram-bot>=20.7
+
+# --- Environment management ---
+python-dotenv>=1.0.0
+
+# --- Utilities ---
+requests>=2.31.0
