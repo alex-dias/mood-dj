@@ -4,6 +4,7 @@ import random
 import datetime
 import getpass
 import re
+import requests
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 from dotenv import load_dotenv
@@ -115,19 +116,86 @@ def get_current_context() -> str:
     return now.strftime("%A, %H:%M")
 
 @tool
-def get_my_top_artists() -> str:
+def get_weather(city: str) -> str:
     """
-    Retrieves the current user's top artists from Spotify.
-    Useful for selecting artists that the user already likes.
-    Returns a JSON string containing artist names, IDs, and genres.
+    Returns the current weather for a given city.
+    Useful for enriching mood context (e.g., rainy day -> calmer playlist).
+    Requires OPENWEATHERMAP_API_KEY in the .env file.
     """
-    results = sp.current_user_top_artists(limit=10, time_range="medium_term")
-    artists = [{
-        "name": a.get("name"),
-        "id": a.get("id"),
-        "genres": a.get("genres", [])
-    } for a in results.get("items", []) if a.get("genres")]
-    return json.dumps(artists)
+    api_key = os.environ.get("OPENWEATHERMAP_API_KEY")
+    if not api_key:
+        return "Weather data unavailable (no API key configured)"
+    try:
+        url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={api_key}&units=metric"
+        response = requests.get(url, timeout=5)
+        data = response.json()
+        if response.status_code != 200:
+            return f"Could not fetch weather for '{city}': {data.get('message', 'unknown error')}"
+        weather_desc = data["weather"][0]["description"].capitalize()
+        temp = data["main"]["temp"]
+        humidity = data["main"]["humidity"]
+        return f"{weather_desc}, {temp}°C, {humidity}% humidity"
+    except Exception as e:
+        return f"Weather lookup failed: {e}"
+
+@tool
+def search_spotify(query: str) -> str:
+    """
+    Searches Spotify for artists or tracks matching the query.
+    Useful when the user mentions a specific artist or song by name.
+    Returns the top 5 results with name, ID, and type (artist/track).
+    """
+    try:
+        results = sp.search(q=query, limit=5, type="artist,track")
+        output = []
+        for artist in results.get("artists", {}).get("items", []):
+            output.append({
+                "type": "artist",
+                "name": artist["name"],
+                "id": artist["id"],
+                "genres": artist.get("genres", [])
+            })
+        for track in results.get("tracks", {}).get("items", []):
+            output.append({
+                "type": "track",
+                "name": track["name"],
+                "id": track["id"],
+                "artist": track["artists"][0]["name"] if track["artists"] else "Unknown"
+            })
+        return json.dumps(output)
+    except Exception as e:
+        return f"Spotify search failed: {e}"
+
+@tool
+def get_audio_features(track_id: str) -> str:
+    """
+    Returns the audio features of a specific Spotify track.
+    Useful when the user says 'make a playlist like this song'.
+    Returns energy, valence, danceability, tempo, acousticness, and instrumentalness.
+    """
+    try:
+        features = sp.audio_features([track_id])
+        if not features or not features[0]:
+            return f"No audio features found for track ID: {track_id}"
+        f = features[0]
+        return json.dumps({
+            "energy": f.get("energy"),
+            "valence": f.get("valence"),
+            "danceability": f.get("danceability"),
+            "tempo": f.get("tempo"),
+            "acousticness": f.get("acousticness"),
+            "instrumentalness": f.get("instrumentalness")
+        })
+    except Exception as e:
+        return f"Audio features lookup failed: {e}"
+
+# This is a regular helper function (NOT a tool) because the LLM does not
+# need to decide when to call it. We always call it ourselves in the main
+# runtime to get seed artists for the Spotify Recommendations API.
+def get_top_artist_ids(limit=5):
+    """Fetches the user's top artist IDs from Spotify to use as seeds."""
+    results = sp.current_user_top_artists(limit=limit, time_range="medium_term")
+    return [a["id"] for a in results.get("items", []) if a.get("id")]
 
 # NOTE: We do NOT use @tool here because this function is called directly
 # by our Python code AFTER the agent finishes. The LLM agent only outputs
@@ -135,8 +203,7 @@ def get_my_top_artists() -> str:
 # is handled entirely by our code below.
 def create_playlist(
     name: str,
-    seed_type: str,
-    seed_value: str,
+    seed_artist_ids: list,
     energy: float,
     valence: float,
     instrumentalness: float
@@ -147,14 +214,11 @@ def create_playlist(
         name = "AI DJ Mix"
     log("SPOTIFY", f"Creating playlist '{name}'")
     
-    seeds = {}
-    if seed_type == "artist" and seed_value:
-        seeds["seed_artists"] = [seed_value]
-    elif seed_type == "genre" and seed_value:
-        seeds["seed_genres"] = [seed_value]
+    # Use artist IDs as seeds; fall back to genre if no artists available
+    if seed_artist_ids:
+        seeds = {"seed_artists": seed_artist_ids[:2]}  # Spotify allows up to 5 seeds total
     else:
-        # Fallback to prevent an empty seeds dictionary which crashes the Spotify API
-        seeds["seed_genres"] = ["pop"]
+        seeds = {"seed_genres": ["pop"]}
 
     log("SPOTIFY", f"Seeds: {seeds} | Energy: {energy} | Valence: {valence} | Instr: {instrumentalness}")
 
@@ -214,36 +278,29 @@ You are an Elite AI DJ.
 
 Your task is to map human mood into structured musical intent.
 
-You MUST output JSON with:
-- mood_name (short, creative)
+You have access to tools to enrich your analysis:
+- get_current_context: returns the current day and time
+- get_weather: returns the weather for a city (use it if the user mentions a location)
+- search_spotify: searches for artists/tracks by name (use it if the user mentions a specific artist or song)
+- get_audio_features: returns audio features of a Spotify track (use it to analyze a track the user references)
+
+After gathering context, you MUST output ONLY a JSON object with these fields:
+- mood_name: a short, creative name for the mood
 - energy_band: one of [very_low, low, medium, high, very_high]
 - valence_band: one of [negative, neutral, positive]
 - instrumentalness_band: one of [vocal, mixed, instrumental]
 
-You MUST also choose TWO seeds:
-- safe_seed: aligned with user's listening history
-- spicy_seed: exploratory but mood-compatible
-
-Each seed must be formatted as:
-{
-  "type": "artist" | "genre",
-  "value": "<MUST_BE_EXACT_SPOTIFY_ID_OR_ALLOWED_GENRE>"
-}
-
 Rules:
-- If type is "artist", you MUST provide the EXACT Spotify ID (e.g., "4q3ewBCX7sLwd24euuV69X"), NOT the artist's name!
-- If type is "genre", use a simple, broad genre (e.g., "pop", "rock", "hip-hop", "classical", "jazz").
 - If user mentions focus/study/code/read -> instrumentalness_band MUST be "instrumental"
-- Safe seed prioritizes taste match
-- Spicy seed prioritizes novelty without breaking mood
-- Do NOT output numeric values
-- Do NOT explain reasoning
+- Do NOT output numeric values, only the band names above
+- Do NOT explain reasoning, output ONLY the JSON object
 """
 
 # 3. Bind Tools and Create the Agent
 # In LangGraph, `create_react_agent` replaces the old AgentExecutor + create_tool_calling_agent pattern.
 # It creates a ReAct-style agent that can decide which tools to call, observe results, and respond.
-tools = [get_current_context, get_my_top_artists]
+# We give the agent all available tools so it can enrich its analysis.
+tools = [get_current_context, get_weather, search_spotify, get_audio_features]
 
 agent = create_react_agent(
     model=llm,
@@ -311,6 +368,13 @@ if __name__ == "__main__":
 
     log("INTENT", json.dumps(payload, indent=2))
 
+    # Fetch the user's top artists from Spotify to use as seeds.
+    # We do this ourselves instead of relying on the LLM, which avoids
+    # hallucinated artist IDs and keeps the LLM's job simple.
+    log("SPOTIFY", "Fetching top artists for seeding...")
+    top_artist_ids = get_top_artist_ids(limit=5)
+    log("SPOTIFY", f"Found {len(top_artist_ids)} top artists")
+
     # Calculate actual Spotify API parameters using our bands
     energy_safe = sample_band("energy", payload["energy_band"], "safe")
     valence_safe = sample_band("valence", payload["valence_band"], "safe")
@@ -318,21 +382,20 @@ if __name__ == "__main__":
 
     print(f"\n[SAFE PLAYLIST VALUES] Energy: {energy_safe} | Valence: {valence_safe} | Instrumentalness: {instr_safe}\n")
 
-    # Create the primary 'safe' playlist
+    # Create the primary 'safe' playlist using the user's top artists as seeds
     mood_name = payload.get("mood_name") or "Mood Mix"
-    safe_seed = payload.get("safe_seed", {})
     safe_url = create_playlist(
         name=f"AI DJ: {mood_name}",
-        seed_type=safe_seed.get("type", "genre"),
-        seed_value=safe_seed.get("value", "pop"),
+        seed_artist_ids=top_artist_ids[:2],
         energy=energy_safe,
         valence=valence_safe,
         instrumentalness=instr_safe
     )
 
-    log("DONE", f"Safe playlist created → {safe_url}")
+    log("DONE", f"Safe playlist created -> {safe_url}")
 
     # Occasionally create a 'spicy' alternate playlist
+    # The spicy playlist uses different (less-listened) artists as seeds
     if should_create_spicy():
         log("SURPRISE", "🌶️ Spicy playlist triggered")
 
@@ -342,16 +405,16 @@ if __name__ == "__main__":
 
         print(f"\n[SPICY PLAYLIST VALUES] Energy: {energy_spicy} | Valence: {valence_spicy} | Instrumentalness: {instr_spicy}\n")
 
-        spicy_seed = payload.get("spicy_seed", {})
+        # Use the tail end of top artists for variety
+        spicy_seeds = top_artist_ids[2:4] if len(top_artist_ids) > 2 else top_artist_ids
         spicy_url = create_playlist(
             name=f"AI DJ: {mood_name} 🌶️",
-            seed_type=spicy_seed.get("type", "genre"),
-            seed_value=spicy_seed.get("value", "pop"),
+            seed_artist_ids=spicy_seeds,
             energy=energy_spicy,
             valence=valence_spicy,
             instrumentalness=instr_spicy
         )
 
-        log("DONE", f"Spicy playlist created → {spicy_url}")
+        log("DONE", f"Spicy playlist created -> {spicy_url}")
     else:
         log("SURPRISE", "No spicy playlist this time")
