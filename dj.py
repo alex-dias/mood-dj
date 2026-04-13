@@ -312,7 +312,7 @@ def create_playlist(
     Uses sp.search() instead of the deprecated sp.recommendations() endpoint.
     """
     if not name or not name.strip():
-        name = "AI DJ Mix"
+        name = "Mood DJ Mix"
     log("SPOTIFY", f"Creating playlist '{name}'")
 
     tracks = get_tracks_by_mood(
@@ -338,7 +338,7 @@ def create_playlist(
         payload={
             "name": name,
             "public": False,
-            "description": f"AI DJ | {energy_band} energy | {valence_band} valence",
+            "description": f"Mood DJ | {energy_band} energy | {valence_band} valence",
         },
     )
 
@@ -368,7 +368,7 @@ creative_llm = ChatAnthropic(
 
 # 3. System Prompt
 SYSTEM_PROMPT = """
-You are an Elite AI DJ. Your ONLY job is to output a JSON object.
+You are an Elite Mood DJ. Your ONLY job is to output a JSON object.
 
 You have access to tools:
 - get_current_context: returns current day and time
@@ -423,13 +423,13 @@ def generate_mood_name(user_input: str, payload: dict) -> str:
 # =========================================================
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="AI DJ - mood-based Spotify playlist generator")
+    parser = argparse.ArgumentParser(description="Mood DJ - mood-based Spotify playlist generator")
     parser.add_argument("--debug", action="store_true", help="Print full agent message chain and raw LLM output")
     args = parser.parse_args()
 
     init_clients()
 
-    log("READY", "🎧 AI DJ is live")
+    log("READY", "🎧 Mood DJ is live")
     user_input = input(">> How are you feeling or what do you need? ")
 
     log("LLM", "Agent is analyzing intent and invoking tools...")
@@ -500,9 +500,63 @@ if __name__ == "__main__":
     safe_genre   = genre_hints[0]  if genre_hints else ""
     spicy_genre  = genre_hints[-1] if genre_hints else ""
 
+    # ── Summary before creation ──────────────────────────────────────
+    spicy_triggered = should_create_spicy()
+
+    # Compute the audio feature target ranges for display
+    profile = "spicy" if spicy_triggered else "safe"
+    energy_range   = BANDS["energy"][payload["energy_band"]]["safe"]
+    valence_range  = BANDS["valence"][payload["valence_band"]]["safe"]
+    instr_range    = BANDS["instrumentalness"][payload["instrumentalness_band"]]["safe"]
+
+    # Preview the search query
+    preview_query = build_search_query(
+        payload["energy_band"],
+        payload["valence_band"],
+        payload["instrumentalness_band"],
+        safe_genre,
+    )
+
+    print("\n" + "=" * 60)
+    print("  🎧  Mood DJ — Playlist Summary")
+    print("=" * 60)
+    print(f"  📝 You said:           \"{user_input}\"")
+    print(f"  🎵 Playlist name:      {mood_name}")
+    print()
+    print("  🧠 Detected Mood Bands:")
+    print(f"     • Energy:           {payload['energy_band']}")
+    print(f"     • Valence:          {payload['valence_band']}")
+    print(f"     • Instrumentalness: {payload['instrumentalness_band']}")
+    print()
+    print("  🎚️  Audio Feature Targets (Spotify scale 0.0–1.0):")
+    print(f"     • Energy:           {energy_range[0]:.2f} – {energy_range[1]:.2f}")
+    print(f"     • Valence:          {valence_range[0]:.2f} – {valence_range[1]:.2f}")
+    print(f"     • Instrumentalness: {instr_range[0]:.2f} – {instr_range[1]:.2f}")
+    print()
+    print("  🔍 Search query:       \"" + preview_query + "\"")
+    print()
+    print("  👤 Top artists used for genre hints:")
+    for a in top_artists:
+        genres_str = ", ".join(a["genres"][:3]) if a["genres"] else "no genres"
+        print(f"     • {a['name']}  ({genres_str})")
+    print(f"  🏷️  Genre hint (safe):  {safe_genre or '(none)'}")
+    if spicy_triggered:
+        print(f"  🌶️  Genre hint (spicy): {spicy_genre or '(none)'}")
+        print(f"  🎲 Spicy playlist:     YES — surprise triggered!")
+    else:
+        print(f"  🎲 Spicy playlist:     No (not triggered this run)")
+    print("=" * 60)
+
+    confirm = input("\n>> Ready to create? Type 'yes' to proceed: ").strip().lower()
+    if confirm not in ("yes", "y"):
+        log("ABORT", "Playlist creation cancelled by user.")
+        exit(0)
+
+    print()
+
     # --- Safe playlist ---
     safe_url = create_playlist(
-        name=f"AI DJ: {mood_name}",
+        name=f"Mood DJ: {mood_name}",
         energy_band=payload["energy_band"],
         valence_band=payload["valence_band"],
         instrumentalness_band=payload["instrumentalness_band"],
@@ -511,12 +565,12 @@ if __name__ == "__main__":
     log("DONE", f"Safe playlist created -> {safe_url}")
 
     # --- Spicy playlist (occasional surprise) ---
-    if should_create_spicy():
+    if spicy_triggered:
         log("SURPRISE", "🌶️  Spicy playlist triggered")
         log("SURPRISE", f"Spicy genre hint: '{spicy_genre}'")
 
         spicy_url = create_playlist(
-            name=f"AI DJ: {mood_name} 🌶️",
+            name=f"Mood DJ: {mood_name} 🌶️",
             energy_band=payload["energy_band"],
             valence_band=payload["valence_band"],
             instrumentalness_band=payload["instrumentalness_band"],
