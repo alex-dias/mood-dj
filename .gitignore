@@ -138,6 +138,7 @@ celerybeat.pid
 .env
 .envrc
 .venv
+client_secret.json
 env/
 venv/
 ENV/
@@ -205,3 +206,10 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Token/credential files
+*.pickle
+token.json
+
+# macOS
+.DS_Store

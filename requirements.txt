@@ -1,6 +1,6 @@
 # --- LLM / Agent ---
-langchain>=0.2.0
-langchain-core>=0.2.0
+langchain>=1.0.0
+langchain-core>=1.0.0
 langchain-google-genai>=1.0.0
 
 # --- Spotify ---
@@ -11,6 +11,11 @@ python-telegram-bot>=20.7
 
 # --- Environment management ---
 python-dotenv>=1.0.0
+
+# --- YouTube ---
+google-api-python-client>=2.100.0
+google-auth-oauthlib>=1.0.0
+google-auth-httplib2>=0.1.0
 
 # --- Utilities ---
 requests>=2.31.0
