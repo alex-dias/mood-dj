@@ -23,49 +23,57 @@ from langgraph.prebuilt import create_react_agent
 # CONFIGURATION
 # =========================================================
 
-SURPRISE_PROBABILITY = 0.18  # ~1 in 5 runs will trigger the spicy playlist
 
-BANDS = {
-    "energy": {
-        "very_low": {"safe": (0.05, 0.20), "spicy": (0.05, 0.35)},
-        "low":      {"safe": (0.20, 0.35), "spicy": (0.15, 0.45)},
-        "medium":   {"safe": (0.45, 0.55), "spicy": (0.35, 0.70)},
-        "high":     {"safe": (0.75, 0.85), "spicy": (0.65, 0.95)},
-        "very_high":{"safe": (0.90, 1.00), "spicy": (0.80, 1.00)},
-    },
-    "valence": {
-        "negative": {"safe": (0.10, 0.35), "spicy": (0.05, 0.45)},
-        "neutral":  {"safe": (0.45, 0.55), "spicy": (0.35, 0.65)},
-        "positive": {"safe": (0.70, 0.85), "spicy": (0.55, 0.95)},
-    },
-    "instrumentalness": {
-        "vocal":         {"safe": (0.0,  0.2),  "spicy": (0.0,  0.4)},
-        "mixed":         {"safe": (0.3,  0.6),  "spicy": (0.2,  0.7)},
-        "instrumental":  {"safe": (0.85, 0.95), "spicy": (0.65, 1.0)},
-    }
+# Comprehensive genre whitelist — the LLM must pick from this list.
+# Each entry should return good results when used as a Spotify search term.
+GENRE_WHITELIST = {
+    # Pop & Mainstream
+    "pop", "indie pop", "synth pop", "electropop", "dream pop",
+    "k-pop", "j-pop", "latin pop", "dance pop", "art pop",
+    # Rock
+    "rock", "indie rock", "alternative rock", "classic rock", "punk rock",
+    "hard rock", "grunge", "post-punk", "shoegaze", "emo",
+    "progressive rock", "psychedelic rock", "garage rock", "soft rock",
+    # Metal
+    "metal", "heavy metal", "death metal", "black metal", "metalcore",
+    # Electronic
+    "electronic", "edm", "house", "deep house", "tech house",
+    "techno", "trance", "dubstep", "drum and bass", "ambient",
+    "synthwave", "chillwave", "downtempo", "future bass",
+    "lo-fi", "lo-fi hip hop", "chillhop",
+    # Hip-Hop & R&B
+    "hip-hop", "rap", "trap", "r&b", "neo-soul", "soul", "funk",
+    "boom bap", "conscious hip-hop", "drill",
+    # Latin
+    "reggaeton", "latin", "salsa", "bachata", "merengue",
+    "samba", "bossa nova", "mpb", "forró", "sertanejo", "pagode",
+    "cumbia", "tango", "vallenato", "reggaeton romantico",
+    # Jazz & Blues
+    "jazz", "smooth jazz", "blues", "swing", "bebop", "jazz fusion",
+    # Classical & Instrumental
+    "classical", "piano", "orchestral", "soundtrack", "new age",
+    "chamber music", "opera",
+    # Country & Folk
+    "country", "folk", "bluegrass", "americana", "singer-songwriter",
+    "celtic", "indie folk",
+    # Reggae & Caribbean
+    "reggae", "dancehall", "ska", "dub",
+    # African & World
+    "afrobeat", "afropop", "world music", "highlife",
+    # Other
+    "gospel", "disco", "new wave", "post-rock", "math rock",
+    "noise", "experimental", "vaporwave", "phonk",
 }
 
-# Maps mood bands to Spotify search keywords
-ENERGY_KEYWORDS = {
-    "very_low": "calm ambient",
-    "low":      "chill mellow",
-    "medium":   "indie alternative",
-    "high":     "energetic upbeat",
-    "very_high":"intense hype",
-}
-VALENCE_KEYWORDS = {
-    "negative": "sad melancholic",
-    "neutral":  "mellow thoughtful",
-    "positive": "happy feel good",
-}
-INSTRUMENTALNESS_KEYWORDS = {
-    "vocal":        "",             # default — no extra keyword needed
-    "mixed":        "lo-fi",
-    "instrumental": "instrumental",
+# Single mood keyword per valence — used to flavor genre-based queries
+MOOD_KEYWORDS = {
+    "negative": "sad",
+    "neutral":  "chill",
+    "positive": "upbeat",
 }
 
 # Keys the LLM must include in its JSON response
-REQUIRED_PAYLOAD_KEYS = {"energy_band", "valence_band", "instrumentalness_band"}
+REQUIRED_PAYLOAD_KEYS = {"energy_band", "valence_band", "instrumentalness_band", "wants_twist", "skip_top_artists", "genres"}
 
 # =========================================================
 # UTILITIES
@@ -75,14 +83,12 @@ def log(step, message):
     """Consistent logging format for the console."""
     print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] [{step}] {message}")
 
-def sample_band(band_name, band_value, profile):
-    """Samples a random value within the specified band for the Spotify API."""
-    low, high = BANDS[band_name][band_value][profile]
-    return round(random.uniform(low, high), 2)
 
-def should_create_spicy():
-    """Returns True if a spicy playlist should be created."""
-    return random.random() < SURPRISE_PROBABILITY
+def validate_genres(genres: list) -> list:
+    """Validates LLM-picked genres against the whitelist. Returns only valid ones."""
+    valid = [g for g in genres if g.lower() in GENRE_WHITELIST]
+    return valid if valid else ["pop"]  # safe fallback
+
 
 def clean_json_output(text: str) -> str:
     """
@@ -229,7 +235,7 @@ def get_top_artists(limit=5) -> list:
         log("SPOTIFY_ERROR", f"Failed to fetch top artists: {e}")
         return []
 
-def get_spicy_genre_seeds(top_artists: list, limit=2) -> list:
+def get_twist_genre_seeds(top_artists: list, limit=2) -> list:
     """
     Derives genre seeds from the user's top artists.
     Picks the least common genres to push toward discovery territory.
@@ -241,93 +247,97 @@ def get_spicy_genre_seeds(top_artists: list, limit=2) -> list:
             genre_counts[genre] = genre_counts.get(genre, 0) + 1
 
     sorted_genres = sorted(genre_counts, key=lambda g: genre_counts[g])
-    spicy = sorted_genres[:limit]
-    return spicy if spicy else ["indie", "electronic"]
+    twist = sorted_genres[:limit]
+    return twist if twist else ["indie", "electronic"]
 
-def build_search_query(
-    energy_band: str,
+def build_search_queries(
+    genres: list,
     valence_band: str,
-    instrumentalness_band: str,
     genre_hint: str = "",
-) -> str:
+) -> list:
     """
-    Builds a Spotify search query string from mood band labels.
-    Combines energy, valence, and instrumentalness keywords with an optional
-    genre hint (e.g. a genre from the user's top artists).
+    Builds multiple focused Spotify search queries from validated genres
+    and a mood keyword. Returns a list of query strings.
 
-    Replaces sp.recommendations() which was deprecated in November 2024.
+    Strategy:
+      - Query per genre (pure genre match)
+      - Query per genre + mood keyword (mood-flavored)
+      - Optional genre_hint from top artists for personalization
     """
-    parts = [
-        VALENCE_KEYWORDS[valence_band],
-        ENERGY_KEYWORDS[energy_band],
-        INSTRUMENTALNESS_KEYWORDS[instrumentalness_band],
-        genre_hint,
-    ]
-    return " ".join(p for p in parts if p).strip()
+    mood_word = MOOD_KEYWORDS.get(valence_band, "")
+    queries = []
 
-def get_tracks_by_mood(
-    energy_band: str,
+    for genre in genres:  # use all validated genres
+        queries.append(genre)                               # pure genre
+        if mood_word:
+            queries.append(f"{genre} {mood_word}")          # genre + mood
+
+    # Add a genre_hint-flavored query if available
+    if genre_hint and genre_hint not in genres:
+        queries.append(f"{genre_hint} {mood_word}".strip())
+
+    return queries
+
+def get_tracks_by_search(
+    genres: list,
     valence_band: str,
-    instrumentalness_band: str,
     genre_hint: str = "",
     limit: int = 20,
 ) -> list:
     """
-    Searches Spotify for tracks matching the mood bands using keyword search.
-    Returns a shuffled list of track URIs for variety across repeated runs.
+    Searches Spotify using multiple focused queries for better results.
+    Runs each query separately and merges results for variety.
 
-    Replaces sp.recommendations() which was deprecated in November 2024.
     Uses pagination (max 10 per request) due to Spotify API limit changes (Feb 2026).
     """
-    query = build_search_query(energy_band, valence_band, instrumentalness_band, genre_hint)
-    log("SPOTIFY", f"Search query: '{query}'")
+    queries = build_search_queries(genres, valence_band, genre_hint)
+    all_tracks = []
 
-    try:
-        # Spotify search limit is now capped at 10, so paginate to collect enough tracks
-        tracks = []
-        page_limit = 10
-        for offset in range(0, limit * 2, page_limit):
-            results = sp.search(q=query, type="track", limit=page_limit, offset=offset)
-            items = results.get("tracks", {}).get("items", [])
-            tracks.extend(t["uri"] for t in items)
-            if len(items) < page_limit:
-                break  # No more results available
-        # Deduplicate, shuffle, and trim
-        tracks = list(dict.fromkeys(tracks))  # preserve order but remove dupes
-        random.shuffle(tracks)
-        return tracks[:limit]
-    except Exception as e:
-        log("SPOTIFY_ERROR", f"Track search failed: {e}")
-        return []
+    for query in queries:
+        log("SPOTIFY", f"Search query: '{query}'")
+        try:
+            page_limit = 10
+            for offset in range(0, 20, page_limit):
+                results = sp.search(q=query, type="track", limit=page_limit, offset=offset)
+                items = results.get("tracks", {}).get("items", [])
+                all_tracks.extend(t["uri"] for t in items)
+                if len(items) < page_limit:
+                    break
+        except Exception as e:
+            log("SPOTIFY_ERROR", f"Search failed for '{query}': {e}")
+
+    # Deduplicate, shuffle, and trim
+    all_tracks = list(dict.fromkeys(all_tracks))
+    random.shuffle(all_tracks)
+    log("SPOTIFY", f"Collected {len(all_tracks)} unique tracks from {len(queries)} queries")
+    return all_tracks[:limit]
 
 def create_playlist(
     name: str,
-    energy_band: str,
+    genres: list,
     valence_band: str,
-    instrumentalness_band: str,
     genre_hint: str = "",
 ) -> str:
     """
-    Creates a Spotify playlist using mood-informed keyword search.
-    Uses sp.search() instead of the deprecated sp.recommendations() endpoint.
+    Creates a Spotify playlist using genre-based keyword search.
+    Runs multiple focused queries (genre + mood) for better results.
     """
     if not name or not name.strip():
         name = "Mood DJ Mix"
     log("SPOTIFY", f"Creating playlist '{name}'")
 
-    tracks = get_tracks_by_mood(
-        energy_band=energy_band,
+    tracks = get_tracks_by_search(
+        genres=genres,
         valence_band=valence_band,
-        instrumentalness_band=instrumentalness_band,
         genre_hint=genre_hint,
         limit=20,
     )
 
     if not tracks:
-        log("API_FALLBACK", "Mood search returned no tracks. Falling back to generic query...")
+        log("API_FALLBACK", "Genre search returned no tracks. Falling back to generic query...")
         tracks = []
         for offset in range(0, 20, 10):
-            results = sp.search(q="feel good pop", type="track", limit=10, offset=offset)
+            results = sp.search(q="popular music", type="track", limit=10, offset=offset)
             items = results.get("tracks", {}).get("items", [])
             tracks.extend(t["uri"] for t in items)
             if len(items) < 10:
@@ -338,7 +348,7 @@ def create_playlist(
         payload={
             "name": name,
             "public": False,
-            "description": f"Mood DJ | {energy_band} energy | {valence_band} valence",
+            "description": f"Mood DJ | genres: {', '.join(genres)} | mood: {valence_band}",
         },
     )
 
@@ -356,7 +366,7 @@ def create_playlist(
 llm = ChatAnthropic(
     model="claude-haiku-4-5-20251001",
     temperature=0.0,
-    max_tokens=150,
+    max_tokens=350,
 )
 
 # 2. Creative LLM — temperature=0.7 for evocative playlist name generation
@@ -386,13 +396,50 @@ Required output format:
 {
   "energy_band": <one of: very_low, low, medium, high, very_high>,
   "valence_band": <one of: negative, neutral, positive>,
-  "instrumentalness_band": <one of: vocal, mixed, instrumental>
+  "instrumentalness_band": <one of: vocal, mixed, instrumental>,
+  "wants_twist": <true or false>,
+  "skip_top_artists": <true or false>,
+  "genres": [<1 to 3 genres from the allowed list>]
 }
 
+Field rules:
+- "wants_twist": set to true ONLY when the user explicitly asks to be surprised, wants a twist,
+  wants something unexpected, or asks for a wildcard. Default is false.
+- "skip_top_artists": set to true ONLY when the user explicitly asks to hear something different
+  from their usual taste, wants to discover new music, or says they are tired of the same artists.
+  Default is false.
+- "genres": pick genres that best match the user's intent from the allowed list below.
+  IMPORTANT RULE:
+  - If the user asks for a SPECIFIC genre or style (e.g. "samba", "jazz", "metal"), pick only 1–2
+    closely related genres that match what they asked for. Stay focused.
+  - If the user describes a VAGUE mood or feeling (e.g. "I'm happy", "feeling chill", "pumped"),
+    pick up to 5 diverse genres that fit that mood for maximum variety.
+  You MUST choose from this list:
+  pop, indie pop, synth pop, electropop, dream pop, k-pop, j-pop, latin pop, dance pop, art pop,
+  rock, indie rock, alternative rock, classic rock, punk rock, hard rock, grunge, post-punk,
+  shoegaze, emo, progressive rock, psychedelic rock, garage rock, soft rock,
+  metal, heavy metal, death metal, black metal, metalcore,
+  electronic, edm, house, deep house, tech house, techno, trance, dubstep, drum and bass,
+  ambient, synthwave, chillwave, downtempo, future bass, lo-fi, lo-fi hip hop, chillhop,
+  hip-hop, rap, trap, r&b, neo-soul, soul, funk, boom bap, conscious hip-hop, drill,
+  reggaeton, latin, salsa, bachata, merengue, samba, bossa nova, mpb, forró, sertanejo,
+  pagode, cumbia, tango, vallenato, reggaeton romantico,
+  jazz, smooth jazz, blues, swing, bebop, jazz fusion,
+  classical, piano, orchestral, soundtrack, new age, chamber music, opera,
+  country, folk, bluegrass, americana, singer-songwriter, celtic, indie folk,
+  reggae, dancehall, ska, dub,
+  afrobeat, afropop, world music, highlife,
+  gospel, disco, new wave, post-rock, math rock, noise, experimental, vaporwave, phonk.
+  Do NOT invent genres outside this list.
+
 Examples:
-- "so so" -> {"energy_band": "low", "valence_band": "neutral", "instrumentalness_band": "vocal"}
-- "pumped for the gym" -> {"energy_band": "very_high", "valence_band": "positive", "instrumentalness_band": "vocal"}
-- "coding late at night" -> {"energy_band": "medium", "valence_band": "neutral", "instrumentalness_band": "instrumental"}
+- "so so" -> {"energy_band": "low", "valence_band": "neutral", "instrumentalness_band": "vocal", "wants_twist": false, "skip_top_artists": false, "genres": ["indie pop", "soft rock", "chillwave", "dream pop"]}
+- "pumped for the gym" -> {"energy_band": "very_high", "valence_band": "positive", "instrumentalness_band": "vocal", "wants_twist": false, "skip_top_artists": false, "genres": ["edm", "trap", "hip-hop", "drill", "phonk"]}
+- "I want some samba in my life!" -> {"energy_band": "high", "valence_band": "positive", "instrumentalness_band": "vocal", "wants_twist": false, "skip_top_artists": false, "genres": ["samba", "pagode"]}
+- "surprise me!" -> {"energy_band": "high", "valence_band": "positive", "instrumentalness_band": "mixed", "wants_twist": true, "skip_top_artists": false, "genres": ["electronic", "funk", "afrobeat", "disco"]}
+- "I want something totally different from what I usually listen to" -> {"energy_band": "medium", "valence_band": "neutral", "instrumentalness_band": "vocal", "wants_twist": false, "skip_top_artists": true, "genres": ["jazz", "bossa nova", "soul", "blues", "swing"]}
+- "give me some jazz" -> {"energy_band": "medium", "valence_band": "neutral", "instrumentalness_band": "mixed", "wants_twist": false, "skip_top_artists": false, "genres": ["jazz", "smooth jazz"]}
+- "coding late at night" -> {"energy_band": "medium", "valence_band": "neutral", "instrumentalness_band": "instrumental", "wants_twist": false, "skip_top_artists": false, "genres": ["lo-fi hip hop", "chillhop", "ambient", "downtempo"]}
 """
 
 # 4. Bind tools and create the ReAct agent
@@ -490,61 +537,67 @@ if __name__ == "__main__":
     mood_name = generate_mood_name(user_input, payload)
     log("MOOD", f"Playlist name: '{mood_name}'")
 
+    # ── Flags and genres from LLM ──────────────────────────────────────
+    wants_twist      = payload.get("wants_twist", False)
+    skip_top_artists = payload.get("skip_top_artists", False)
+    raw_genres       = payload.get("genres", ["pop"])
+    genres           = validate_genres(raw_genres)
+
+    log("FLAGS", f"wants_twist={wants_twist}, skip_top_artists={skip_top_artists}")
+    log("GENRES", f"LLM picked: {raw_genres} -> validated: {genres}")
+
     # Fetch top artists — used to derive a genre hint for the search query
-    log("SPOTIFY", "Fetching top artists for genre hint...")
-    top_artists = get_top_artists(limit=5)
-    log("SPOTIFY", f"Found {len(top_artists)} top artists")
+    top_artists = []
+    if not skip_top_artists:
+        log("SPOTIFY", "Fetching top artists for genre hint...")
+        top_artists = get_top_artists(limit=5)
+        log("SPOTIFY", f"Found {len(top_artists)} top artists")
+    else:
+        log("SPOTIFY", "Skipping top artists (user wants something different from usual)")
 
     # Genre hints personalize the search query without needing the recommendations API
-    genre_hints  = get_spicy_genre_seeds(top_artists)
-    safe_genre   = genre_hints[0]  if genre_hints else ""
-    spicy_genre  = genre_hints[-1] if genre_hints else ""
+    genre_hints   = get_twist_genre_seeds(top_artists) if top_artists else []
+    safe_genre    = genre_hints[0]  if genre_hints else ""
+    twist_genre   = genre_hints[-1] if genre_hints else ""
 
-    # ── Summary before creation ──────────────────────────────────────
-    spicy_triggered = should_create_spicy()
-
-    # Compute the audio feature target ranges for display
-    profile = "spicy" if spicy_triggered else "safe"
-    energy_range   = BANDS["energy"][payload["energy_band"]]["safe"]
-    valence_range  = BANDS["valence"][payload["valence_band"]]["safe"]
-    instr_range    = BANDS["instrumentalness"][payload["instrumentalness_band"]]["safe"]
-
-    # Preview the search query
-    preview_query = build_search_query(
-        payload["energy_band"],
+    # Preview the search queries for the summary
+    preview_queries = build_search_queries(
+        genres,
         payload["valence_band"],
-        payload["instrumentalness_band"],
-        safe_genre,
+        safe_genre if not skip_top_artists else "",
     )
 
+    # ── Summary before creation ──────────────────────────────────────
     print("\n" + "=" * 60)
     print("  🎧  Mood DJ — Playlist Summary")
     print("=" * 60)
     print(f"  📝 You said:           \"{user_input}\"")
     print(f"  🎵 Playlist name:      {mood_name}")
     print()
-    print("  🧠 Detected Mood Bands:")
+    print("  🧠 Detected Mood:")
     print(f"     • Energy:           {payload['energy_band']}")
     print(f"     • Valence:          {payload['valence_band']}")
     print(f"     • Instrumentalness: {payload['instrumentalness_band']}")
+    print(f"     • Genres:           {', '.join(genres)}")
     print()
-    print("  🎚️  Audio Feature Targets (Spotify scale 0.0–1.0):")
-    print(f"     • Energy:           {energy_range[0]:.2f} – {energy_range[1]:.2f}")
-    print(f"     • Valence:          {valence_range[0]:.2f} – {valence_range[1]:.2f}")
-    print(f"     • Instrumentalness: {instr_range[0]:.2f} – {instr_range[1]:.2f}")
+    print(f"  🔍 Search queries ({len(preview_queries)} total):")
+    for i, q in enumerate(preview_queries, 1):
+        print(f"     {i}. \"{q}\"")
     print()
-    print("  🔍 Search query:       \"" + preview_query + "\"")
-    print()
-    print("  👤 Top artists used for genre hints:")
-    for a in top_artists:
-        genres_str = ", ".join(a["genres"][:3]) if a["genres"] else "no genres"
-        print(f"     • {a['name']}  ({genres_str})")
-    print(f"  🏷️  Genre hint (safe):  {safe_genre or '(none)'}")
-    if spicy_triggered:
-        print(f"  🌶️  Genre hint (spicy): {spicy_genre or '(none)'}")
-        print(f"  🎲 Spicy playlist:     YES — surprise triggered!")
+    if skip_top_artists:
+        print("  👤 Top artists:        SKIPPED (discovery mode)")
     else:
-        print(f"  🎲 Spicy playlist:     No (not triggered this run)")
+        print("  👤 Top artists used for genre hints:")
+        for a in top_artists:
+            genres_str = ", ".join(a["genres"][:3]) if a["genres"] else "no genres"
+            print(f"     • {a['name']}  ({genres_str})")
+        print(f"  🏷️  Genre hint:        {safe_genre or '(none)'}")
+    print()
+    if wants_twist:
+        print(f"  🔀 Twist playlist:     YES — you asked for a surprise!")
+        print(f"  🏷️  Twist genre hint:  {twist_genre or '(none)'}")
+    else:
+        print(f"  🔀 Twist playlist:     No")
     print("=" * 60)
 
     confirm = input("\n>> Ready to create? Type 'yes' to proceed: ").strip().lower()
@@ -554,28 +607,24 @@ if __name__ == "__main__":
 
     print()
 
-    # --- Safe playlist ---
-    safe_url = create_playlist(
+    # --- Main playlist ---
+    main_url = create_playlist(
         name=f"Mood DJ: {mood_name}",
-        energy_band=payload["energy_band"],
+        genres=genres,
         valence_band=payload["valence_band"],
-        instrumentalness_band=payload["instrumentalness_band"],
-        genre_hint=safe_genre,
+        genre_hint=safe_genre if not skip_top_artists else "",
     )
-    log("DONE", f"Safe playlist created -> {safe_url}")
+    log("DONE", f"Playlist created -> {main_url}")
 
-    # --- Spicy playlist (occasional surprise) ---
-    if spicy_triggered:
-        log("SURPRISE", "🌶️  Spicy playlist triggered")
-        log("SURPRISE", f"Spicy genre hint: '{spicy_genre}'")
+    # --- Twist playlist (when user asks for a surprise) ---
+    if wants_twist:
+        log("TWIST", "🔀 Twist playlist triggered by user request")
+        log("TWIST", f"Twist genre hint: '{twist_genre}'")
 
-        spicy_url = create_playlist(
-            name=f"Mood DJ: {mood_name} 🌶️",
-            energy_band=payload["energy_band"],
+        twist_url = create_playlist(
+            name=f"Mood DJ: {mood_name} 🔀",
+            genres=genres,
             valence_band=payload["valence_band"],
-            instrumentalness_band=payload["instrumentalness_band"],
-            genre_hint=spicy_genre,
+            genre_hint=twist_genre,
         )
-        log("DONE", f"Spicy playlist created -> {spicy_url}")
-    else:
-        log("SURPRISE", "No spicy playlist this time")
+        log("DONE", f"Twist playlist created -> {twist_url}")
